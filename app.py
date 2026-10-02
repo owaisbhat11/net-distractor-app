@@ -6,8 +6,8 @@ from rapidfuzz import fuzz
 st.set_page_config(page_title="NTA Distractor Matrix", page_icon="🧠", layout="wide")
 st.title("🧠 NTA Distractor Evolution Predictor")
 st.markdown("""
-Upload a CSV of past papers, and this tool will reverse-engineer the NTA paper-setter's habits 
-by finding where an incorrect option (distractor) became a future question.
+Upload a CSV of past papers. This tool filters out standard boilerplates (e.g., 'Statement I and II', 'A, B only')
+and isolates **genuine literary terms, authors, and conceptual distractors** that evolved across exam cycles.
 """)
 
 def clean_text(text):
@@ -24,22 +24,43 @@ def find_col(columns, patterns):
                 return col
     return None
 
-def is_trivial_code(text):
-    """Filter out options that are just answer codes or matching sequences like 'D, B, C, A, E'."""
-    clean = re.sub(r'[\s,\.\-\(\)\:]', '', text)
-    # Checks if text consists only of option labels, numbers, or roman numerals
-    if re.fullmatch(r'[A-Ea-e1-5ivxIVX]+', clean):
+def is_boilerplate_or_code(text):
+    """Filters out structural exam boilerplate, statement pairs, and letter combinations."""
+    clean = text.lower().strip()
+    
+    # 1. Structural letter patterns like "A, B and C only", "(A), (B), (C)", "B, C and E only"
+    if re.search(r'\b[a-e]\s*(?:,|and|\&)\s*[a-e]', clean):
         return True
+    if re.search(r'\b(?:only|both)\b', clean) and re.search(r'\b[a-e]\b', clean):
+        return True
+        
+    # 2. Stripped down alphanumeric codes (e.g., 'ABCDE', 'I, II, III')
+    compact = re.sub(r'[\s,\.\-\(\)\:\;]', '', clean)
+    if re.fullmatch(r'[a-e1-5ivx]+', compact):
+        return True
+
+    # 3. Statement / Assertion boilerplates
+    boilerplate_phrases = [
+        "statement i", "statement ii", "both statement",
+        "assertion", "reason", "is correct", "is incorrect",
+        "is true", "is false", "not correct", "all of the above",
+        "none of the above", "none of these"
+    ]
+    if any(phrase in clean for phrase in boilerplate_phrases):
+        return True
+        
+    # 4. Too short or empty
+    if len(clean) < 4:
+        return True
+
     return False
 
 def parse_session_date(session_str):
-    """Extract a sortable year and month from raw session strings like 'Dec 2025' or 'Mar 2023'."""
+    """Extract chronological order; handles explicit dates, years, and fallback indexing."""
     s = str(session_str)
-    # Look for a 4-digit year (e.g. 2020, 2023, 2025, 2026)
     year_match = re.search(r'\b(20\d{2})\b', s)
     year = int(year_match.group(1)) if year_match else 2000
     
-    # Map month name to integer
     month_map = {
         'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
         'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
@@ -50,10 +71,10 @@ def parse_session_date(session_str):
             month = m_val
             break
             
-    return (year * 100) + month  # e.g., 202303 for March 2023, 202512 for Dec 2025
+    return (year * 100) + month
 
 uploaded_file = st.file_uploader("Upload your PYQ Database (CSV)", type=['csv'])
-threshold = st.slider("Match Confidence Threshold (%)", min_value=70, max_value=100, value=82)
+threshold = st.slider("Match Confidence Threshold (%)", min_value=75, max_value=100, value=84)
 
 if uploaded_file is not None:
     try:
@@ -77,7 +98,6 @@ if uploaded_file is not None:
             st.error("Missing essential columns. Ensure session, question, and answer columns are present.")
             st.stop()
 
-        # Generate a numerical sort key for true chronological order
         df['sort_date'] = df[session_col].apply(parse_session_date)
         df = df.sort_values(by=['sort_date', id_col]).reset_index(drop=True)
 
@@ -121,26 +141,31 @@ if uploaded_file is not None:
         for i in range(total_q):
             t1_item = records[i]
             for distractor in t1_item['distractors']:
-                # Skip junk, codes like 'A, B, C', or single short words
-                if len(distractor) < 4 or is_trivial_code(distractor) or distractor.lower() in ["none of these", "all of the above"]:
+                # Filter out boilerplates, codes, and generic combinations
+                if is_boilerplate_or_code(distractor):
                     continue
 
                 for j in range(i + 1, total_q):
                     t2_item = records[j]
 
-                    # Strictly enforce forward-in-time matching
+                    # Enforce strict forward progression
                     if t2_item['sort_date'] <= t1_item['sort_date']:
                         continue
                     
+                    if is_boilerplate_or_code(t2_item['correct_text']):
+                        continue
+
+                    # Direct option evolution (Distractor in A -> Answer in B)
                     score_ans = fuzz.token_sort_ratio(distractor.lower(), t2_item['correct_text'].lower())
                     if score_ans >= threshold:
                         matches.append({
-                            "Distractor Term": distractor,
-                            "Original Session (Cycle A)": t1_item['session'],
-                            "Target Session (Cycle B)": t2_item['session'],
+                            "Matched Literary Entity": distractor,
+                            "Original Exam (Cycle A)": t1_item['session'],
+                            "Target Exam (Cycle B)": t2_item['session'],
                             "Confidence": f"{score_ans:.1f}%",
-                            "Original Question": t1_item['stem'],
-                            "Target Answer": t2_item['correct_text']
+                            "Cycle A Stem": t1_item['stem'],
+                            "Cycle B Stem": t2_item['stem'],
+                            "Cycle B Answer": t2_item['correct_text']
                         })
 
             progress_bar.progress(int((i / total_q) * 100))
@@ -148,14 +173,14 @@ if uploaded_file is not None:
         progress_bar.empty()
 
         if matches:
-            st.success(f"Found {len(matches)} genuine recycled distractors!")
+            st.success(f"Isolated {len(matches)} genuine literary distractor evolutions!")
             results_df = pd.DataFrame(matches).sort_values(by="Confidence", ascending=False)
             st.dataframe(results_df, use_container_width=True)
             
             csv_export = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Report (CSV)", data=csv_export, file_name="cleaned_distractor_report.csv")
+            st.download_button("Download Curated Report (CSV)", data=csv_export, file_name="genuine_distractor_evolutions.csv")
         else:
-            st.warning("No matches found. Try lowering the threshold slider slightly.")
+            st.warning("No matches found with current settings. Try adjusting the threshold slightly.")
 
     except Exception as e:
         st.error(f"Processing error: {str(e)}")
